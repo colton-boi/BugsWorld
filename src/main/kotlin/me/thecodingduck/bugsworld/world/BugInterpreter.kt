@@ -1,6 +1,5 @@
 package me.thecodingduck.bugsworld.world
 
-import kotlinx.coroutines.yield
 import me.thecodingduck.bugsworld.Action
 import me.thecodingduck.bugsworld.Block
 import me.thecodingduck.bugsworld.BugLogic
@@ -8,67 +7,125 @@ import me.thecodingduck.bugsworld.Condition
 import me.thecodingduck.bugsworld.IfStatement
 import me.thecodingduck.bugsworld.Statement
 import me.thecodingduck.bugsworld.WhileLoop
+import java.util.concurrent.ThreadLocalRandom
 
-class BugInterpreter(val bug: Bug, val logic: BugLogic, private val world: World) {
-    /**
-     * The cell the bug is currently targeting, used for condition evaluation.
-     * This is updated at the start of each turn to reflect the cell in front of the bug.
-     */
-    var target: Cell = Cell.EMPTY
+/**
+ * Stack-based AST interpreter. Each call to [executeTurn] runs until one action
+ * is performed, then returns. The execution stack persists across turns so the
+ * program counter is maintained.
+ */
+class BugInterpreter(val bug: Bug, var logic: BugLogic, private val world: World) {
+    private val species get() = if (bug.speciesId == 1) Cell.SPECIES1 else Cell.SPECIES2
+    private val enemy get() = if (bug.speciesId == 1) Cell.SPECIES2 else Cell.SPECIES1
 
-    /**
-     * The species of the bug, used for condition evaluation.
-     * This is determined by the bug's species ID and is constant throughout the simulation.
-     */
-    private val species = if (bug.speciesId == 1) Cell.SPECIES1 else Cell.SPECIES2
+    // Execution stack frames
+    private sealed class Frame {
+        /** Tracks position within a Block's statement list */
+        class BlockFrame(val statements: List<Statement>, var index: Int) : Frame()
+        /** Re-evaluates condition each iteration; pushes body when true */
+        class WhileFrame(val loop: WhileLoop) : Frame()
+    }
 
-    /**
-     * The enemy species of the bug, used for condition evaluation.
-     */
-    private val enemy = if (bug.speciesId == 1) Cell.SPECIES2 else Cell.SPECIES1
-    private var iterations = 0
+    private val stack = ArrayDeque<Frame>(16)
 
-    /**
-     * Runs one turn of the bug's logic, updating the bug's state and the world accordingly.
-     */
-    val turnIterator = sequence {
-        while (true) {
-            executeNode(logic.statement)
-            yield(Unit) // Failsafe yield if the AST tree is empty
-        }
-    }.iterator()
+    init { resetStack() }
 
-    /**
-     * Recursively executes a statement node, updating the bug's state and the world as needed.
-     * Yields after each action to allow for turn-based simulation.
-     * Has an iteration limit to prevent infinite loops from hanging.
-     */
-    private suspend fun SequenceScope<Unit>.executeNode(node: Statement) {
-        iterations++
-        if (iterations > 100) {
-            // Prevent infinite loops by yielding after too many iterations
-            yield(Unit)
-            iterations = 0
-        }
+    private fun resetStack() {
+        stack.clear()
+        pushNode(logic.statement)
+    }
+
+    fun restartIterator() {
+        resetStack()
+    }
+
+    /** Push a statement onto the stack for future execution. */
+    private fun pushNode(node: Statement) {
         when (node) {
-            is Action -> {
-                performAction(node)
-                yield(Unit) // End the turn after taking an action
+            is Block -> {
+                if (node.statements.isNotEmpty()) {
+                    stack.addLast(Frame.BlockFrame(node.statements, 0))
+                }
             }
-            is IfStatement -> executeIf(node)
-            is WhileLoop -> executeWhile(node)
-            is Block -> node.statements.forEach { executeNode(it) }
+            is WhileLoop -> stack.addLast(Frame.WhileFrame(node))
+            is IfStatement -> {
+                if (evaluateCondition(node.condition)) {
+                    pushNode(node.thenBlock)
+                } else if (node.elseBlock != null) {
+                    pushNode(node.elseBlock)
+                }
+            }
+            is Action -> {
+                // Wrap single action in a block frame so it gets executed in the loop
+                stack.addLast(Frame.BlockFrame(listOf(node), 0))
+            }
+        }
+    }
+
+    /**
+     * Execute one turn: process the stack until an action is performed.
+     * Returns immediately after the action so each bug gets one action per turn.
+     */
+    fun executeTurn() {
+        var iterations = 0
+        while (true) {
+            if (stack.isEmpty()) resetStack()
+            if (stack.isEmpty() || ++iterations > 100) return // prevent runaway loops
+
+            when (val frame = stack.last()) {
+                is Frame.BlockFrame -> {
+                    if (frame.index >= frame.statements.size) {
+                        stack.removeLast()
+                        continue
+                    }
+                    val node = frame.statements[frame.index]
+                    frame.index++
+
+
+                    when (node) {
+                        is Action -> {
+                            performAction(node)
+                            return // end of turn
+                        }
+                        is Block -> {
+                            if (node.statements.isNotEmpty()) {
+                                stack.addLast(Frame.BlockFrame(node.statements, 0))
+                            }
+                        }
+                        is IfStatement -> {
+                            if (evaluateCondition(node.condition)) {
+                                pushNode(node.thenBlock)
+                            } else if (node.elseBlock != null) {
+                                pushNode(node.elseBlock)
+                            }
+                        }
+                        is WhileLoop -> {
+                            stack.addLast(Frame.WhileFrame(node))
+                        }
+                    }
+                }
+                is Frame.WhileFrame -> {
+                    if (evaluateCondition(frame.loop.condition)) {
+                        pushNode(frame.loop.body)
+                    } else {
+                        stack.removeLast()
+                    }
+                }
+            }
         }
     }
 
     private fun performAction(node: Action) {
         when (node) {
             Action.MOVE -> {
-                val nextPos = nextPos()
-                if (world.grid[nextPos.x][nextPos.y] == Cell.EMPTY) {
+                val nx = nextX()
+                val ny = nextY()
+                if (world.grid[nx][ny] == Cell.EMPTY) {
                     world.grid[bug.position.x][bug.position.y] = Cell.EMPTY
-                    bug.position = nextPos
-                    world.grid[nextPos.x][nextPos.y] = species
+                    world.bugGrid[bug.position.x][bug.position.y] = null
+                    bug.position = Point(nx, ny)
+                    world.grid[nx][ny] = species
+                    world.bugGrid[nx][ny] = bug
                 }
             }
             Action.TURN_LEFT -> bug.direction = when (bug.direction) {
@@ -84,50 +141,59 @@ class BugInterpreter(val bug: Bug, val logic: BugLogic, private val world: World
                 Direction.WEST -> Direction.NORTH
             }
             Action.INFECT -> {
-                val nextPos = nextPos()
-                if (world.grid[nextPos.x][nextPos.y] == enemy) {
-                    world.grid[nextPos.x][nextPos.y] = species
+                val nx = nextX()
+                val ny = nextY()
+                if (world.grid[nx][ny] == enemy) {
+                    world.grid[nx][ny] = species
+                    val targetBug = world.bugGrid[nx][ny]
+                    if (targetBug != null) {
+                        if (targetBug.speciesId == 1 && bug.speciesId == 2) {
+                            world.species1Count--
+                            world.species2Count++
+                        } else if (targetBug.speciesId == 2 && bug.speciesId == 1) {
+                            world.species2Count--
+                            world.species1Count++
+                        } else {
+                            // Already same species, don't change counts or restart logic
+                            return
+                        }
+                        targetBug.speciesId = bug.speciesId
+                        val interp = world.interpreters[targetBug.id]
+                        if (interp != null) {
+                            interp.logic = logic
+                            interp.restartIterator()
+                        }
+                    }
                 }
-                world.bugs.find { it.position == nextPos }?.let { it.speciesId = bug.speciesId }
             }
         }
     }
 
-    private suspend fun SequenceScope<Unit>.executeIf(node: IfStatement) {
-        if (evaluateCondition(node.condition)) {
-            executeNode(node.thenBlock)
-        } else if (node.elseBlock != null) {
-            executeNode(node.elseBlock)
-        }
-    }
-
-    private suspend fun SequenceScope<Unit>.executeWhile(node: WhileLoop) {
-        while (evaluateCondition(node.condition)) {
-            executeNode(node.body)
-        }
-    }
-
     private fun evaluateCondition(condition: Condition): Boolean {
-        val nextPos = nextPos()
-        target = world.grid[nextPos.x][nextPos.y]
+        val cell = world.grid[nextX()][nextY()]
         return when (condition) {
-            Condition.NEXT_IS_EMPTY -> target == Cell.EMPTY
-            Condition.NEXT_IS_WALL -> target == Cell.WALL
-            Condition.NEXT_IS_ENEMY -> target == enemy
-            Condition.NEXT_IS_FRIEND -> target == species
-            Condition.NEXT_IS_NOT_EMPTY -> target != Cell.EMPTY
-            Condition.NEXT_IS_NOT_WALL -> target != Cell.WALL
-            Condition.NEXT_IS_NOT_ENEMY -> target != enemy
-            Condition.NEXT_IS_NOT_FRIEND -> target != species
+            Condition.NEXT_IS_EMPTY -> cell == Cell.EMPTY
+            Condition.NEXT_IS_WALL -> cell == Cell.WALL
+            Condition.NEXT_IS_ENEMY -> cell == enemy
+            Condition.NEXT_IS_FRIEND -> cell == species
+            Condition.NEXT_IS_NOT_EMPTY -> cell != Cell.EMPTY
+            Condition.NEXT_IS_NOT_WALL -> cell != Cell.WALL
+            Condition.NEXT_IS_NOT_ENEMY -> cell != enemy
+            Condition.NEXT_IS_NOT_FRIEND -> cell != species
             Condition.TRUE -> true
-            Condition.RANDOM -> Math.random() < 0.5
+            Condition.RANDOM -> ThreadLocalRandom.current().nextBoolean()
         }
     }
 
-    fun nextPos(): Point = when (bug.direction) {
-        Direction.NORTH -> Point(bug.position.x, bug.position.y - 1)
-        Direction.EAST -> Point(bug.position.x + 1, bug.position.y)
-        Direction.SOUTH -> Point(bug.position.x, bug.position.y + 1)
-        Direction.WEST -> Point(bug.position.x - 1, bug.position.y)
+    private fun nextX(): Int = when (bug.direction) {
+        Direction.NORTH, Direction.SOUTH -> bug.position.x
+        Direction.EAST -> bug.position.x + 1
+        Direction.WEST -> bug.position.x - 1
+    }
+
+    private fun nextY(): Int = when (bug.direction) {
+        Direction.EAST, Direction.WEST -> bug.position.y
+        Direction.NORTH -> bug.position.y - 1
+        Direction.SOUTH -> bug.position.y + 1
     }
 }

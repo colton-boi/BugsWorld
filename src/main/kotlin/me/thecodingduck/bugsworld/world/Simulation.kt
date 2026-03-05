@@ -4,13 +4,16 @@ import me.thecodingduck.bugsworld.BugLogic
 
 class Simulation(sideLength: Int, private val bugOne: BugLogic, private val bugTwo: BugLogic) {
     private val world = World(sideLength)
-    private val interpreters = mutableListOf<BugInterpreter>()
 
     private fun spawnBug(speciesId: Int, position: Point, direction: Direction) {
         val bug = Bug(world.bugs.size, position, direction, speciesId)
         world.bugs.add(bug)
         world.grid[position.x][position.y] = if (speciesId == 1) Cell.SPECIES1 else Cell.SPECIES2
-        interpreters.add(BugInterpreter(bug, if (speciesId == 1) bugOne else bugTwo, world))
+        world.bugGrid[position.x][position.y] = bug
+        if (speciesId == 1) world.species1Count++ else world.species2Count++
+        val interpreter = BugInterpreter(bug, if (speciesId == 1) bugOne else bugTwo, world)
+        world.interpreters[bug.id] = interpreter
+        world.interpreterCount++
     }
 
     private fun spawnBugRandom(speciesId: Int) {
@@ -38,7 +41,7 @@ class Simulation(sideLength: Int, private val bugOne: BugLogic, private val bugT
         var totalOne = 0
         var totalTwo = 0
         repeat(20) {
-            if (totalOne < 10 && (totalTwo >= 10 || Math.random() < 0.5)) {
+            if (totalOne < 10 && (totalTwo >= 10 || java.util.concurrent.ThreadLocalRandom.current().nextDouble() < 0.5)) {
                 spawnBugRandom(1)
                 totalOne++
             } else {
@@ -49,25 +52,22 @@ class Simulation(sideLength: Int, private val bugOne: BugLogic, private val bugT
     }
 
     private fun playTurn() {
-        // Iterate through all bugs and trigger their turn
-        for (interpreter in interpreters) {
-            // Execute the bug's logic until it hits a yield(Unit)
-            if (interpreter.turnIterator.hasNext()) {
-                interpreter.turnIterator.next()
-            }
+        val interps = world.interpreters
+        for (i in 0 until world.interpreterCount) {
+            interps[i]!!.executeTurn()
         }
     }
 
     fun playMatch(): Pair<Int, Int> {
         setup()
         var it = 0
-        while (world.bugs.count { it.speciesId == 1 } > 0 && world.bugs.count { it.speciesId == 2 } > 0) {
+        while (world.species1Count > 0 && world.species2Count > 0) {
             playTurn()
             it++
             if (it > 2000) {
                 return 0 to it // Draw after 2k turns to prevent infinite loops
             }
         }
-        return (if (world.bugs.count { it.speciesId == 1 } > 0) 1 else 2) to it
+        return (if (world.species1Count > 0) 1 else 2) to it
     }
 }

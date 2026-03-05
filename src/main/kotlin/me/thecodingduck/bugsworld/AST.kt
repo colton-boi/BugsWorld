@@ -21,16 +21,16 @@ enum class Condition(val code: String) {
 }
 
 data class Block(val statements: MutableList<Statement>) : Statement {
-    override fun toBL() = statements.joinToString("\n") { it.toBL().prependIndent(" ") }
+    override fun toBL() = statements.joinToString("\n") { it.toBL() }
 }
 
 data class IfStatement(val condition: Condition, val thenBlock: Statement, val elseBlock: Statement? = null) : Statement {
-    override fun toBL() = "IF ${condition.code} THEN\n${thenBlock.toBL()}\n" +
-            (if (elseBlock != null) "ELSE\n${elseBlock.toBL()}\n" else "") + "END IF"
+    override fun toBL() = "IF ${condition.code} THEN\n${thenBlock.toBL().prependIndent("  ")}\n" +
+            (if (elseBlock != null) "ELSE\n${elseBlock.toBL().prependIndent("  ")}\n" else "") + "END IF"
 }
 
 data class WhileLoop(val condition: Condition, val body: Statement) : Statement {
-    override fun toBL() = "WHILE ${condition.code} DO\n${body.toBL()}\nEND WHILE"
+    override fun toBL() = "WHILE ${condition.code} DO\n${body.toBL().prependIndent("  ")}\nEND WHILE"
 }
 
 data class BugLogic(val name: String, var statement: Statement) {
@@ -44,7 +44,7 @@ fun generateRandomAST(depth: Int): Statement {
         3, 4, 5, 6 -> {
             var random = generateRandomAST(depth - 1)
             if (random !is Block) random = Block(mutableListOf(random))
-            val elseBlock = if (Math.random() < 0.3) {
+            val elseBlock = if (java.util.concurrent.ThreadLocalRandom.current().nextDouble() < 0.3) {
                 var elseBody = generateRandomAST(depth - 1)
                 if (elseBody !is Block) elseBody = Block(mutableListOf(elseBody))
                 elseBody
@@ -63,54 +63,57 @@ fun generateRandomAST(depth: Int): Statement {
 fun crossOver(ast1: Statement, ast2: Statement): Statement {
     val nodes1 = ast1.getAllNodes()
     val nodes2 = ast2.getAllNodes()
+    val rng = java.util.concurrent.ThreadLocalRandom.current()
 
-    lateinit var target1: Statement
-    lateinit var donor: Statement
-    var found = false
+    // Build indexed list of (index, node) for ast1 and group ast2 nodes by type
+    val indexed1 = nodes1.mapIndexed { i, n -> i to n }
+    val byType = nodes2.groupBy { it::class }
+
+    var targetIndex = -1
+    var donor: Statement? = null
 
     // First try: strict type matching
     for (attempt in 0..20) {
-        val candidate = nodes1.random()
-        val matches = nodes2.filter { it::class == candidate::class }
-        if (matches.isNotEmpty()) {
-            target1 = candidate
-            donor = matches.random()
-            found = true
+        val (idx, candidate) = indexed1[rng.nextInt(indexed1.size)]
+        val matches = byType[candidate::class]
+        if (!matches.isNullOrEmpty()) {
+            targetIndex = idx
+            donor = matches[rng.nextInt(matches.size)]
             break
         }
     }
 
     // Fallback: allow Block↔IfStatement or Block↔WhileLoop
-    if (!found) {
+    if (donor == null) {
+        val blockCompat = (byType[IfStatement::class].orEmpty() + byType[WhileLoop::class].orEmpty())
+        val structCompat = byType[Block::class].orEmpty()
+
         for (attempt in 0..20) {
-            val candidate = nodes1.random()
-            val compatibleTypes = when (candidate) {
-                is Block -> listOf(IfStatement::class, WhileLoop::class)
-                is IfStatement -> listOf(Block::class)
-                is WhileLoop -> listOf(Block::class)
+            val (idx, candidate) = indexed1[rng.nextInt(indexed1.size)]
+            val matches = when (candidate) {
+                is Block -> blockCompat
+                is IfStatement, is WhileLoop -> structCompat
                 else -> emptyList()
             }
-            val matches = nodes2.filter { it::class in compatibleTypes }
             if (matches.isNotEmpty()) {
-                target1 = candidate
-                donor = matches.random()
-                found = true
+                targetIndex = idx
+                donor = matches[rng.nextInt(matches.size)]
                 break
             }
         }
     }
 
     // If still not found, just use a random action as fallback
-    if (!found) {
-        target1 = nodes1.random()
+    if (donor == null) {
+        targetIndex = rng.nextInt(nodes1.size)
         donor = Action.entries.random()
     }
 
-    return ast1.replaceNode(target1, donor)
+    return ast1.replaceNodeAtIndex(targetIndex, donor).first
 }
 
 fun mutate(ast: Statement, mutationRate: Double): Statement {
-    val roll = Math.random()
+    val roll = java.util.concurrent.ThreadLocalRandom.current().nextDouble()
 
     // 1. Full replacement with random subtree
     if (roll < mutationRate * 0.2) return generateRandomAST(3)
@@ -124,7 +127,7 @@ fun mutate(ast: Statement, mutationRate: Double): Statement {
     if (roll < mutationRate * 0.5) {
         return when (ast) {
             is IfStatement -> {
-                val newCondition = if (Math.random() < 0.5) {
+                val newCondition = if (java.util.concurrent.ThreadLocalRandom.current().nextDouble() < 0.5) {
                     toggleConditionNegation(ast.condition)
                 } else {
                     Condition.entries.random()
@@ -133,7 +136,7 @@ fun mutate(ast: Statement, mutationRate: Double): Statement {
                     if (ast.elseBlock != null) mutate(ast.elseBlock, mutationRate) else null)
             }
             is WhileLoop -> {
-                val newCondition = if (Math.random() < 0.5) {
+                val newCondition = if (java.util.concurrent.ThreadLocalRandom.current().nextDouble() < 0.5) {
                     toggleConditionNegation(ast.condition)
                 } else {
                     Condition.entries.random()
@@ -151,7 +154,7 @@ fun mutate(ast: Statement, mutationRate: Double): Statement {
 
     // 5. Add else block to IfStatement that lacks one
     if (roll < mutationRate * 0.85 && ast is IfStatement && ast.elseBlock == null) {
-        val elseBody = generateRandomAST(2)
+        val elseBody = generateRandomAST(3)
         return IfStatement(ast.condition, mutate(ast.thenBlock, mutationRate), elseBody)
     }
 
@@ -210,17 +213,44 @@ fun Statement.getAllNodes(): List<Statement> {
     return list
 }
 
-fun Statement.replaceNode(target: Statement, replacement: Statement): Statement {
-    if (this === target) return replacement
+fun Statement.replaceNodeAtIndex(targetIndex: Int, replacement: Statement): Pair<Statement, Int> {
+    if (targetIndex == 0) return replacement to -1
+
+    var remaining = targetIndex
 
     return when (this) {
-        is IfStatement -> IfStatement(condition,
-            thenBlock.replaceNode(target, replacement),
-            elseBlock?.replaceNode(target, replacement))
-        is WhileLoop -> WhileLoop(condition,
-            body.replaceNode(target, replacement))
-        is Block -> Block(statements.map { it.replaceNode(target, replacement) }.toMutableList())
-        else -> this
+        is Action -> this to remaining
+        is IfStatement -> {
+            remaining--
+            val (newThen, r1) = thenBlock.replaceNodeAtIndex(remaining, replacement)
+            if (r1 < 0) return IfStatement(condition, newThen, elseBlock) to -1
+            remaining = r1
+            if (elseBlock != null) {
+                val (newElse, r2) = elseBlock.replaceNodeAtIndex(remaining, replacement)
+                if (r2 < 0) return IfStatement(condition, newThen, newElse) to -1
+                remaining = r2
+            }
+            IfStatement(condition, newThen, elseBlock) to remaining
+        }
+        is WhileLoop -> {
+            remaining--
+            val (newBody, r) = body.replaceNodeAtIndex(remaining, replacement)
+            if (r < 0) return WhileLoop(condition, newBody) to -1
+            WhileLoop(condition, newBody) to r
+        }
+        is Block -> {
+            remaining--
+            val newStatements = statements.toMutableList()
+            for (i in newStatements.indices) {
+                val (newChild, r) = newStatements[i].replaceNodeAtIndex(remaining, replacement)
+                if (r < 0) {
+                    newStatements[i] = newChild
+                    return Block(newStatements) to -1
+                }
+                remaining = r
+            }
+            Block(newStatements) to remaining
+        }
     }
 }
 
@@ -234,7 +264,71 @@ fun Statement.countNodes(): Int {
 }
 
 
-val simpleMap = mutableMapOf<Statement, Statement>()
+fun parseBL(text: String): BugLogic {
+    val tokens = text.trim().split("\\s+".toRegex()).toMutableList()
+    fun expect(expected: String) {
+        val tok = tokens.removeFirst()
+        require(tok == expected) { "Expected '$expected' but got '$tok'" }
+    }
+
+    expect("DEFINE")
+    val name = tokens.removeFirst()
+    val body = parseStatement(tokens)
+    expect("END")
+    expect("DEFINE")
+    return BugLogic(name, body)
+}
+
+private fun parseStatement(tokens: MutableList<String>): Statement {
+    val statements = mutableListOf<Statement>()
+    while (tokens.isNotEmpty()) {
+        when (tokens.first()) {
+            "END", "ELSE" -> break
+            "IF" -> statements.add(parseIf(tokens))
+            "WHILE" -> statements.add(parseWhile(tokens))
+            else -> statements.add(parseAction(tokens))
+        }
+    }
+    return if (statements.size == 1) statements[0] else Block(statements)
+}
+
+private fun parseIf(tokens: MutableList<String>): IfStatement {
+    tokens.removeFirst() // IF
+    val condition = parseCondition(tokens)
+    val tok = tokens.removeFirst()
+    require(tok == "THEN") { "Expected 'THEN' but got '$tok'" }
+    val thenBlock = parseStatement(tokens)
+    val elseBlock = if (tokens.isNotEmpty() && tokens.first() == "ELSE") {
+        tokens.removeFirst() // ELSE
+        parseStatement(tokens)
+    } else null
+    tokens.removeFirst() // END
+    tokens.removeFirst() // IF
+    return IfStatement(condition, thenBlock, elseBlock)
+}
+
+private fun parseWhile(tokens: MutableList<String>): WhileLoop {
+    tokens.removeFirst() // WHILE
+    val condition = parseCondition(tokens)
+    val tok = tokens.removeFirst()
+    require(tok == "DO") { "Expected 'DO' but got '$tok'" }
+    val body = parseStatement(tokens)
+    tokens.removeFirst() // END
+    tokens.removeFirst() // WHILE
+    return WhileLoop(condition, body)
+}
+
+private fun parseCondition(tokens: MutableList<String>): Condition {
+    val code = tokens.removeFirst()
+    return Condition.entries.first { it.code == code }
+}
+
+private fun parseAction(tokens: MutableList<String>): Action {
+    val code = tokens.removeFirst()
+    return Action.entries.first { it.code == code }
+}
+
+val simpleMap = java.util.concurrent.ConcurrentHashMap<Statement, Statement>()
 fun Statement.simplify(): Statement {
     val temp = simpleMap[this]
     if (temp != null) return temp
