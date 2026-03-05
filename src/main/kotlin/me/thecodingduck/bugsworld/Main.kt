@@ -87,22 +87,29 @@ val handcraftedOpponents = listOf(
     BugLogic("ApexSwarm", apexSwarmLogic)
 )
 
-fun loadBestBugFromFile(): BugLogic? {
-    val file = File("best_bug.bl")
-    if (!file.exists()) return null
+fun loadTop50FromFile(): List<BugLogic> {
+    val file = File("top_bugs.bl")
+    if (!file.exists()) return emptyList()
     return try {
-        val bug = parseBL(file.readText())
-        println("Loaded best bug from file: ${bug.name} (${bug.statement.countNodes()} nodes)")
-        bug
+        val text = file.readText()
+        val blocks = "DEFINE[\\s\\S]*?END DEFINE".toRegex().findAll(text).map { it.value }.toList()
+        val bugs = blocks.mapNotNull { block ->
+            try { parseBL(block) } catch (e: Exception) { null }
+        }
+        println("Loaded ${bugs.size} bugs from file")
+        bugs
     } catch (e: Exception) {
-        println("Warning: Failed to parse best_bug.bl: ${e.message}")
-        null
+        println("Warning: Failed to parse top_bugs.bl: ${e.message}")
+        emptyList()
     }
 }
 
 data class GenerationRecord(val generation: Int, val bestBugs: List<BugLogic>) // Store top 3 best bugs from the generation
 
 val generationHistory = mutableListOf<GenerationRecord>()
+
+// Rolling top 50 bugs across all generations, tracked as (bug, fitness)
+val rollingTop50 = mutableListOf<Pair<BugLogic, Double>>()
 
 var population = MutableList(GaConfig.POPULATION_SIZE) {
     BugLogic(it.toString(), generateRandomAST(7))
@@ -112,15 +119,19 @@ fun main() {
     println("Starting Evolutionary Algorithm with population size ${GaConfig.POPULATION_SIZE} and ${GaConfig.GENERATIONS} generations")
     println("Configuration: TOURNAMENT_SIZE=${GaConfig.TOURNAMENT_SIZE}, MUTATION_RATE=${GaConfig.MUTATION_RATE}, NODE_PENALTY=${GaConfig.NODE_PENALTY}")
 
-    val savedBug = loadBestBugFromFile()
-    if (savedBug != null) {
-        population[0] = savedBug
-        // Also seed a few mutated variants of the saved bug
-        for (i in 1..minOf(9, GaConfig.POPULATION_SIZE - 1)) {
+    val savedBugs = loadTop50FromFile()
+    for ((i, bug) in savedBugs.take(GaConfig.POPULATION_SIZE - 1).withIndex()) {
+        population[i] = bug
+    }
+    // Also seed mutated variants of the best saved bug
+    if (savedBugs.isNotEmpty()) {
+        val bestSaved = savedBugs[0]
+        val startIdx = savedBugs.size
+        for (i in startIdx..minOf(startIdx + 9, GaConfig.POPULATION_SIZE - 1)) {
             population[i] = BugLogic(UUID.randomUUID().toString(),
-                mutate(savedBug.statement,
+                mutate(bestSaved.statement,
                     GaConfig.MUTATION_RATE * 2.0 /
-                        savedBug.statement.countNodes().toDouble()))
+                        bestSaved.statement.countNodes().toDouble()))
         }
     }
     population.addAll(handcraftedOpponents)
@@ -139,7 +150,7 @@ fun main() {
              fitnessScores = runBlocking(Dispatchers.Default) {
                 populationSnapshot.map { bug ->
                     async {
-                        bug to evaluateFitness(bug, bestEver?.first ?: bug, gen)
+                        bug to evaluateFitness(bug, gen)
                     }
                 }.awaitAll()
             }.sortedByDescending { it.second }
@@ -149,6 +160,15 @@ fun main() {
         if (bestEver == null || bestThisGen.second > bestEver.second) {
             bestEver = bestThisGen
         }
+
+        // Update rolling top 50
+        rollingTop50.addAll(fitnessScores.take(10))
+        val seen = mutableSetOf<String>()
+        val deduped = rollingTop50
+            .sortedByDescending { it.second }
+            .filter { seen.add(it.first.statement.simplify().toBL()) }
+        rollingTop50.clear()
+        rollingTop50.addAll(deduped.take(50))
 
         // Record best opponent from this generation
         generationHistory.add(GenerationRecord(gen, fitnessScores.take(3).map { it.first }))
@@ -179,7 +199,7 @@ fun main() {
 
         if (gen % 10 == 0) {
             println("Best Logic:\n${bestThisGen.first.statement.toBL()}\n")
-            saveBestBugToFile(bestThisGen.first)
+            saveTop50ToFile(rollingTop50.map { it.first })
         }
 
         // Selection & Reproduction
@@ -210,8 +230,8 @@ fun main() {
     println("\nFinal best bug (all generations):")
     if (bestEver != null) {
         println(bestEver.first.statement.toBL())
-        saveBestBugToFile(bestEver.first)
     }
+    saveTop50ToFile(rollingTop50.map { it.first })
 }
 
 fun getBestOpponentsCandidates(currentGen: Int): List<BugLogic> {
@@ -224,27 +244,12 @@ fun getBestOpponentsCandidates(currentGen: Int): List<BugLogic> {
             .filter { it.generation >= recentCutoff }
             .flatMap { it.bestBugs }
         candidates.addAll(recentOpponents)
-
-        // Add best opponents from last 20 generations for long-term memory
-        val longTermCutoff = maxOf(0, currentGen - 20)
-        val longTermBest = generationHistory
-            .filter { it.generation >= longTermCutoff }
-            .map { it.bestBugs.first() }
-        candidates.addAll(longTermBest)
-    }
-
-    if (currentGen > 20) {
-        // After 20 generations, also include the best ever bug to ensure it's always a benchmark
-        val bestEver = generationHistory.flatMap { it.bestBugs }.maxByOrNull { evaluateFitness(it, it) }
-        if (bestEver != null) {
-            candidates.add(bestEver)
-        }
     }
 
     return candidates.toList()
 }
 
-fun evaluateFitness(bug: BugLogic, bestEver: BugLogic, currentGen: Int = 0): Double {
+fun evaluateFitness(bug: BugLogic, currentGen: Int = 0): Double {
     var score = 0.0
     val nodeCount = bug.statement.countNodes()
 
@@ -266,11 +271,6 @@ fun evaluateFitness(bug: BugLogic, bestEver: BugLogic, currentGen: Int = 0): Dou
     // Add handcrafted opponents
     repeat(GaConfig.DEFAULT_OPPONENTS) {
         opponents.addAll(handcraftedOpponents)
-    }
-
-    // Test against the best ever
-    repeat(2) {
-        opponents.add(BugLogic(bestEver.name, bestEver.statement.simplify()))
     }
 
     var timeouts = 0
@@ -339,6 +339,6 @@ fun tournamentSelection(scoredPopulation: List<Pair<BugLogic, Double>>): BugLogi
     return best!!
 }
 
-fun saveBestBugToFile(bug: BugLogic) {
-    File("best_bug.bl").writeText(bug.statement.simplify().toBL())
+fun saveTop50ToFile(bugs: List<BugLogic>) {
+    File("top_bugs.bl").writeText(bugs.joinToString("\n\n") { BugLogic(it.name, it.statement.simplify()).toBL() })
 }
