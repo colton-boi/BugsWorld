@@ -10,15 +10,15 @@ import java.util.UUID
 import kotlin.system.measureTimeMillis
 
 object GaConfig {
-    const val POPULATION_SIZE = 250
-    const val GENERATIONS = 50
+    const val POPULATION_SIZE = 1000
+    const val GENERATIONS = 500
     const val ELITE_COUNT = 10
     const val TOURNAMENT_SIZE = (POPULATION_SIZE * 0.05).toInt() // 5% of the population for selection pressure
     const val MUTATION_RATE = 0.1
-    const val RANDOM_OPPONENTS = 25
-    const val DEFAULT_OPPONENTS = 10
+    const val RANDOM_OPPONENTS = 15
+    const val DEFAULT_OPPONENTS = 2 // Each handcrafted opponent is played this many times (×5 opponents)
     const val MAX_NODES = 60
-    const val NODE_PENALTY = 6
+    const val NODE_PENALTY = 5
     val GRID_SIZES = listOf(17)
 }
 
@@ -29,6 +29,54 @@ val defaultLogic = WhileLoop(Condition.TRUE,
             Action.INFECT,
             IfStatement(Condition.NEXT_IS_WALL, Action.TURN_LEFT)), Action.INFECT))
     )
+
+// Aggressive Scanner: prioritizes infecting, moves into empty space, turns right at obstacles
+val aggressiveScannerLogic = WhileLoop(Condition.TRUE,
+    IfStatement(Condition.NEXT_IS_ENEMY,
+        Action.INFECT,
+        IfStatement(Condition.NEXT_IS_EMPTY,
+            Action.MOVE,
+            Action.TURN_RIGHT))
+)
+
+// Wall Follower: infects enemies, turns left at walls, turns right past friends, otherwise moves
+val wallFollowerLogic = WhileLoop(Condition.TRUE,
+    IfStatement(Condition.NEXT_IS_ENEMY,
+        Action.INFECT,
+        IfStatement(Condition.NEXT_IS_WALL,
+            Action.TURN_LEFT,
+            IfStatement(Condition.NEXT_IS_FRIEND,
+                Action.TURN_RIGHT,
+                Action.MOVE)))
+)
+
+// Random Turner: rushes forward, infects enemies, uses random turns at walls for unpredictability
+val randomTurnerLogic = WhileLoop(Condition.TRUE,
+    Block(mutableListOf(
+        WhileLoop(Condition.NEXT_IS_EMPTY, Action.MOVE),
+        IfStatement(Condition.NEXT_IS_ENEMY,
+            Action.INFECT,
+            IfStatement(Condition.NEXT_IS_WALL,
+                IfStatement(Condition.RANDOM, Action.TURN_LEFT, Action.TURN_RIGHT),
+                Action.TURN_LEFT))))
+)
+
+// Double Infector: checks and infects from current facing, then moves/turns and checks again
+val doubleInfectorLogic = WhileLoop(Condition.TRUE,
+    Block(mutableListOf(
+        IfStatement(Condition.NEXT_IS_ENEMY,
+            Action.INFECT,
+            IfStatement(Condition.NEXT_IS_EMPTY, Action.MOVE, Action.TURN_RIGHT)),
+        IfStatement(Condition.NEXT_IS_ENEMY, Action.INFECT)))
+)
+
+val handcraftedOpponents = listOf(
+    BugLogic("Default", defaultLogic),
+    BugLogic("AggressiveScanner", aggressiveScannerLogic),
+    BugLogic("WallFollower", wallFollowerLogic),
+    BugLogic("RandomTurner", randomTurnerLogic),
+    BugLogic("DoubleInfector", doubleInfectorLogic),
+)
 
 var population = MutableList(GaConfig.POPULATION_SIZE) {
     BugLogic(it.toString(), generateRandomAST(5))
@@ -65,15 +113,20 @@ fun main() {
         val maxFitness = fitnessScores.first().second
         val uniqueNodes = bestThisGen.first.statement.countNodes()
 
-        // Test best against default
-        val opponent = BugLogic("Default", defaultLogic)
-        val simulation = Simulation(17, bestThisGen.first, opponent)
-        val winner = simulation.playMatch()
-        val beatsDefault = winner.first == 1
+        // Test best against all handcrafted opponents
+        val beatResults = handcraftedOpponents.map { opponent ->
+            val simulation = Simulation(17, bestThisGen.first, opponent)
+            val winner = simulation.playMatch()
+            opponent.name to (winner.first == 1)
+        }
+        val beatsAll = beatResults.all { it.second }
+        val beatsSummary = beatResults.joinToString(", ") { "${it.first}=${it.second}" }
 
+        val winsCount = beatResults.count { it.second }
         println("Gen $gen: size=${population.size}, " +
                 "min/avg/max fitness = ${minFitness.toInt()} / ${avgFitness.toInt()} / ${maxFitness.toInt()}, " +
-                "nodes=${uniqueNodes}, beats_default=$beatsDefault, time=${took}ms")
+                "nodes=${uniqueNodes}, wins=${winsCount}/${beatResults.size}, time=${took}ms")
+        println("  Matchups: $beatsSummary")
 
         if (gen % 10 == 0) {
             println("Best Logic:\n${bestThisGen.first.statement.toBL()}\n")
@@ -85,7 +138,7 @@ fun main() {
 
         // Keep the top N (Elitism)
         newPopulation.addAll(fitnessScores.take(GaConfig.ELITE_COUNT).map { it.first })
-        newPopulation.add(BugLogic("Default", defaultLogic))
+        newPopulation.addAll(handcraftedOpponents)
 
         // Fill the rest of the population
         while (newPopulation.size < GaConfig.POPULATION_SIZE) {
@@ -139,7 +192,7 @@ fun evaluateFitness(bug: BugLogic): Double {
         opponents.add(BugLogic(randomOpponent.name, randomOpponent.statement.simplify()))
     }
     repeat(GaConfig.DEFAULT_OPPONENTS) {
-        opponents.add(BugLogic("Default", defaultLogic))
+        opponents.addAll(handcraftedOpponents)
     }
 
     for (opponent in opponents) {
