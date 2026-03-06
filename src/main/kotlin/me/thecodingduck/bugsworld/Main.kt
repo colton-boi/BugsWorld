@@ -10,13 +10,13 @@ import java.util.UUID
 import kotlin.system.measureTimeMillis
 
 object GaConfig {
-    const val POPULATION_SIZE = 750
+    const val POPULATION_SIZE = 1000
     const val GENERATIONS = 2500
     const val ELITE_COUNT = (POPULATION_SIZE * 0.075).toInt()
     const val TOURNAMENT_SIZE = (POPULATION_SIZE * 0.03).toInt()
-    const val MUTATION_RATE = 2.5 // Base mutation rate, adjusted dynamically based on fitness and size
+    const val MUTATION_RATE = 3 // Base mutation rate, adjusted dynamically based on fitness and size
     const val DEFAULT_OPPONENTS = 1 // Each handcrafted opponent is played this many times (x5 opponents)
-    const val MATCHES_PER_OPPONENT = 100
+    const val MATCHES_PER_OPPONENT = 50
     const val MAX_NODES = 500
     const val NODE_PENALTY = 5.0
 }

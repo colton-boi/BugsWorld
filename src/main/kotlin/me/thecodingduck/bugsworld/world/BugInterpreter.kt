@@ -1,12 +1,10 @@
 package me.thecodingduck.bugsworld.world
 
 import me.thecodingduck.bugsworld.Action
-import me.thecodingduck.bugsworld.Block
 import me.thecodingduck.bugsworld.BugLogic
 import me.thecodingduck.bugsworld.Condition
-import me.thecodingduck.bugsworld.IfStatement
-import me.thecodingduck.bugsworld.Statement
-import me.thecodingduck.bugsworld.WhileLoop
+import me.thecodingduck.bugsworld.bytecode.Compiler
+import me.thecodingduck.bugsworld.bytecode.Opcode
 import java.util.concurrent.ThreadLocalRandom
 
 /**
@@ -15,190 +13,144 @@ import java.util.concurrent.ThreadLocalRandom
  * program counter is maintained.
  */
 class BugInterpreter(val bug: Bug, var logic: BugLogic, private val world: World) {
+
+    // Cache the ordinals directly as static integers
+    companion object {
+        private val COND_TRUE = Condition.TRUE.ordinal
+        private val COND_RANDOM = Condition.RANDOM.ordinal
+        private val COND_NEXT_IS_EMPTY = Condition.NEXT_IS_EMPTY.ordinal
+        private val COND_NEXT_IS_WALL = Condition.NEXT_IS_WALL.ordinal
+        private val COND_NEXT_IS_ENEMY = Condition.NEXT_IS_ENEMY.ordinal
+        private val COND_NEXT_IS_FRIEND = Condition.NEXT_IS_FRIEND.ordinal
+        private val COND_NEXT_IS_NOT_EMPTY = Condition.NEXT_IS_NOT_EMPTY.ordinal
+        private val COND_NEXT_IS_NOT_WALL = Condition.NEXT_IS_NOT_WALL.ordinal
+        private val COND_NEXT_IS_NOT_ENEMY = Condition.NEXT_IS_NOT_ENEMY.ordinal
+        private val COND_NEXT_IS_NOT_FRIEND = Condition.NEXT_IS_NOT_FRIEND.ordinal
+    }
+
+    private var i = 0 // counter
+
     private var species: Cell = Cell.EMPTY
     private var enemy: Cell = Cell.EMPTY
 
-    // Execution stack frames
-    private sealed class Frame {
-        /** Tracks position within a Block's statement list */
-        class BlockFrame(val statements: List<Statement>, var index: Int) : Frame()
-        /** Re-evaluates condition each iteration; pushes body when true */
-        class WhileFrame(val loop: WhileLoop) : Frame()
-        class ActionFrame(val action: Action) : Frame()
-    }
+    private var bytecode: IntArray = Compiler.compile(logic.statement)
 
-    private val stack = ArrayDeque<Frame>(16)
+    init { restartProgram() }
 
-    private fun resetStack() {
-        stack.clear()
-        pushNode(logic.statement)
-    }
-
-    init { restartIterator() }
-
-    fun restartIterator() {
+    fun restartProgram() {
+        i = 0
         updateFactions()
-        resetStack()
     }
 
     private fun updateFactions() {
-        species = if (bug.speciesId == 1) Cell.SPECIES1 else Cell.SPECIES2
-        enemy = if (bug.speciesId == 1) Cell.SPECIES2 else Cell.SPECIES1
-    }
-
-    /** Push a statement onto the stack for future execution. */
-    private fun pushNode(node: Statement) {
-        when (node) {
-            is Block -> {
-                if (node.statements.isNotEmpty()) {
-                    stack.addLast(Frame.BlockFrame(node.statements, 0))
-                }
-            }
-            is WhileLoop -> stack.addLast(Frame.WhileFrame(node))
-            is IfStatement -> {
-                if (evaluateCondition(node.condition)) {
-                    pushNode(node.thenBlock)
-                } else if (node.elseBlock != null) {
-                    pushNode(node.elseBlock)
-                }
-            }
-            is Action -> {
-                stack.addLast(Frame.ActionFrame(node))
-            }
+        if (bug.speciesId == 1) {
+            species = Cell.SPECIES1
+            enemy = Cell.SPECIES2
+        } else {
+            species = Cell.SPECIES2
+            enemy = Cell.SPECIES1
         }
     }
 
     /**
-     * Execute one turn: process the stack until an action is performed.
-     * Returns immediately after the action so each bug gets one action per turn.
+     * Executes the bug's logic until an action is performed.
      */
     fun executeTurn() {
+        val code = bytecode
+        val size = code.size
+        if (size == 0) return // No logic, do nothing
+
         var iterations = 0
-        while (true) {
-            if (stack.isEmpty()) resetStack()
-            if (stack.isEmpty() || ++iterations > 100) return // prevent runaway loops
+        while (iterations++ < 100) {
+            if (i >= size) i = 0 // wrap around to the beginning of the program
 
-            when (val frame = stack.last()) {
-                is Frame.BlockFrame -> {
-                    if (frame.index >= frame.statements.size) {
-                        stack.removeLast()
-                        continue
-                    }
-                    val node = frame.statements[frame.index]
-                    frame.index++
+            when (val opcode = code[i++]) {
+                Opcode.MOVE -> { performMove(); return }
+                Opcode.TURN_LEFT -> { performTurnLeft(); return }
+                Opcode.TURN_RIGHT -> { performTurnRight(); return }
+                Opcode.INFECT -> { performInfect(); return }
 
-                    when (node) {
-                        is Action -> {
-                            performAction(node)
-                            return // end of turn
-                        }
-                        is Block -> {
-                            if (node.statements.isNotEmpty()) {
-                                stack.addLast(Frame.BlockFrame(node.statements, 0))
-                            }
-                        }
-                        is IfStatement -> {
-                            if (evaluateCondition(node.condition)) {
-                                pushNode(node.thenBlock)
-                            } else if (node.elseBlock != null) {
-                                pushNode(node.elseBlock)
-                            }
-                        }
-                        is WhileLoop -> {
-                            stack.addLast(Frame.WhileFrame(node))
-                        }
+                Opcode.JUMP -> i = code[i] // jump to the specified instruction index
+                Opcode.JUMP_IF_FALSE -> {
+                    val conditionId = code[i++]
+                    val jumpTarget = code[i++]
+                    if (!evaluateCondition(conditionId)) {
+                        i = jumpTarget
                     }
                 }
-                is Frame.WhileFrame -> {
-                    if (evaluateCondition(frame.loop.condition)) {
-                        pushNode(frame.loop.body)
-                    } else {
-                        stack.removeLast()
-                    }
-                }
-                is Frame.ActionFrame -> {
-                    stack.removeLast()
-                    performAction(frame.action)
-                    return // end of turn
-                }
+
+                else -> throw IllegalStateException("Invalid opcode: $opcode")
             }
         }
     }
 
-    private fun performAction(node: Action) {
-        when (node) {
-            Action.MOVE -> {
-                val nx = nextX()
-                val ny = nextY()
-                if (world.grid[nx][ny] == Cell.EMPTY) {
-                    world.grid[bug.xPos][bug.yPos] = Cell.EMPTY
-                    world.bugGrid[bug.xPos][bug.yPos] = null
+    private fun performMove() {
+        val nx = bug.xPos + bug.direction.dx
+        val ny = bug.yPos + bug.direction.dy
+        if (world.grid[ny * world.sideLength + nx] == Cell.EMPTY.ordinal.toByte()) {
+            world.grid[bug.yPos * world.sideLength + bug.xPos] = Cell.EMPTY.ordinal.toByte()
+            world.bugGrid[bug.xPos][bug.yPos] = null
 
-                    bug.xPos = nx
-                    bug.yPos = ny
+            bug.xPos = nx
+            bug.yPos = ny
 
-                    world.grid[nx][ny] = species
-                    world.bugGrid[nx][ny] = bug
-                }
+            world.grid[bug.yPos * world.sideLength + bug.xPos] = species.ordinal.toByte()
+            world.bugGrid[nx][ny] = bug
+        }
+    }
+
+    private fun performTurnLeft() {
+        bug.direction = bug.direction.left
+    }
+
+    private fun performTurnRight() {
+        bug.direction = bug.direction.right
+    }
+
+    private fun performInfect() {
+        val nx = bug.xPos + bug.direction.dx
+        val ny = bug.yPos + bug.direction.dy
+        if (world.grid[ny * world.sideLength + nx] == enemy.ordinal.toByte()) {
+            world.grid[ny * world.sideLength + nx] = species.ordinal.toByte() // change the cell to the bug's species
+            val targetBug = world.bugGrid[nx][ny] ?: return
+
+            if (targetBug.speciesId == bug.speciesId) throw IllegalStateException("Infected a bug of the same species??")
+            if (targetBug.speciesId == 1) {
+                world.species1Count--
+                world.species2Count++ // Add this!
+            } else {
+                world.species2Count--
+                world.species1Count++ // Add this!
             }
-            Action.TURN_LEFT -> bug.direction = bug.direction.left
-            Action.TURN_RIGHT -> bug.direction = bug.direction.right
-            Action.INFECT -> {
-                val nx = nextX()
-                val ny = nextY()
-                if (world.grid[nx][ny] == enemy) {
-                    world.grid[nx][ny] = species
-                    val targetBug = world.bugGrid[nx][ny]
-                    if (targetBug != null) {
-                        if (targetBug.speciesId == 1 && bug.speciesId == 2) {
-                            world.species1Count--
-                            world.species2Count++
-                        } else if (targetBug.speciesId == 2 && bug.speciesId == 1) {
-                            world.species2Count--
-                            world.species1Count++
-                        } else {
-                            // Already same species, don't change counts or restart logic
-                            return
-                        }
-                        targetBug.speciesId = bug.speciesId
-                        val interp = world.interpreters[targetBug.id]
-                        if (interp != null) {
-                            interp.logic = logic
-                            interp.restartIterator()
-                        }
-                    }
-                }
+
+            targetBug.speciesId = bug.speciesId
+            val interpreter = world.interpreters[targetBug.id]
+            if (interpreter != null) {
+                interpreter.logic = this.logic
+                interpreter.bytecode = this.bytecode
+                interpreter.restartProgram()
             }
         }
     }
 
-    private fun evaluateCondition(condition: Condition): Boolean {
-        if (condition == Condition.TRUE) return true
-        if (condition == Condition.RANDOM) return ThreadLocalRandom.current().nextBoolean()
+    private fun evaluateCondition(condition: Int): Boolean {
 
-        val cell = world.grid[nextX()][nextY()]
+        if (condition == COND_TRUE) return true
+        if (condition == COND_RANDOM) return ThreadLocalRandom.current().nextBoolean()
+
+        val nx = bug.xPos + bug.direction.dx
+        val ny = bug.yPos + bug.direction.dy
+        val cell = world.grid[ny * world.sideLength + nx]
         return when (condition) {
-            Condition.NEXT_IS_EMPTY -> cell == Cell.EMPTY
-            Condition.NEXT_IS_WALL -> cell == Cell.WALL
-            Condition.NEXT_IS_ENEMY -> cell == enemy
-            Condition.NEXT_IS_FRIEND -> cell == species
-            Condition.NEXT_IS_NOT_EMPTY -> cell != Cell.EMPTY
-            Condition.NEXT_IS_NOT_WALL -> cell != Cell.WALL
-            Condition.NEXT_IS_NOT_ENEMY -> cell != enemy
-            Condition.NEXT_IS_NOT_FRIEND -> cell != species
-            else -> false // Should never happen since all conditions are covered
+            COND_NEXT_IS_EMPTY -> cell == Cell.EMPTY.ordinal.toByte()
+            COND_NEXT_IS_WALL -> cell == Cell.WALL.ordinal.toByte()
+            COND_NEXT_IS_ENEMY -> cell == enemy.ordinal.toByte()
+            COND_NEXT_IS_FRIEND -> cell == species.ordinal.toByte()
+            COND_NEXT_IS_NOT_EMPTY -> cell != Cell.EMPTY.ordinal.toByte()
+            COND_NEXT_IS_NOT_WALL -> cell != Cell.WALL.ordinal.toByte()
+            COND_NEXT_IS_NOT_ENEMY -> cell != enemy.ordinal.toByte()
+            COND_NEXT_IS_NOT_FRIEND -> cell != species.ordinal.toByte()
+            else -> throw IllegalStateException("Invalid condition id: $condition")
         }
-    }
-
-    private fun nextX(): Int = when (bug.direction) {
-        Direction.NORTH, Direction.SOUTH -> bug.xPos
-        Direction.EAST -> bug.xPos + 1
-        Direction.WEST -> bug.xPos - 1
-    }
-
-    private fun nextY(): Int = when (bug.direction) {
-        Direction.EAST, Direction.WEST -> bug.yPos
-        Direction.NORTH -> bug.yPos - 1
-        Direction.SOUTH -> bug.yPos + 1
     }
 }

@@ -1,7 +1,8 @@
 package me.thecodingduck.bugsworld.world
 
 enum class Cell { EMPTY, WALL, SPECIES1, SPECIES2 }
-enum class Direction { NORTH, EAST, SOUTH, WEST;
+enum class Direction(val dx: Int, val dy: Int) {
+    NORTH(0, -1), SOUTH(0, 1), EAST(1, 0), WEST(-1, 0);
     val right by lazy { when (this) {
         NORTH -> EAST
         EAST -> SOUTH
@@ -18,7 +19,7 @@ enum class Direction { NORTH, EAST, SOUTH, WEST;
 data class Point(val x: Int, val y: Int)
 
 data class World(val sideLength: Int) {
-    val grid = Array(sideLength) { Array(sideLength) { Cell.EMPTY } }
+    val grid = ByteArray(sideLength * sideLength) { Cell.EMPTY.ordinal.toByte() }
     val bugGrid = Array(sideLength) { arrayOfNulls<Bug>(sideLength) }
     val bugs = mutableListOf<Bug>()
     val interpreters = arrayOfNulls<BugInterpreter>(100) // 50 per species max

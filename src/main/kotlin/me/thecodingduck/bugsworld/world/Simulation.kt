@@ -8,7 +8,8 @@ class Simulation(sideLength: Int, private val bugOne: BugLogic, private val bugT
     private fun spawnBug(speciesId: Int, position: Point, direction: Direction) {
         val bug = Bug(world.bugs.size, position.x, position.y, direction, speciesId)
         world.bugs.add(bug)
-        world.grid[position.x][position.y] = if (speciesId == 1) Cell.SPECIES1 else Cell.SPECIES2
+        world.grid[position.y * world.sideLength + position.x] =
+            (if (speciesId == 1) Cell.SPECIES1 else Cell.SPECIES2).ordinal.toByte()
         world.bugGrid[position.x][position.y] = bug
         if (speciesId == 1) world.species1Count++ else world.species2Count++
         val interpreter = BugInterpreter(bug, if (speciesId == 1) bugOne else bugTwo, world)
@@ -20,22 +21,22 @@ class Simulation(sideLength: Int, private val bugOne: BugLogic, private val bugT
         var position: Point
         do {
             position = Point((0 until world.sideLength).random(), (0 until world.sideLength).random())
-        } while (world.grid[position.x][position.y] != Cell.EMPTY)
+        } while (world.grid[position.y * world.sideLength + position.x] != Cell.EMPTY.ordinal.toByte())
         val direction = Direction.entries.toTypedArray().random()
         spawnBug(speciesId, position, direction)
     }
 
     private fun spawnWalls() {
         for (i in 0 until world.sideLength) {
-            world.grid[0][i] = Cell.WALL
-            world.grid[world.sideLength - 1][i] = Cell.WALL
-            world.grid[i][0] = Cell.WALL
-            world.grid[i][world.sideLength - 1] = Cell.WALL
+            world.grid[i] = Cell.WALL.ordinal.toByte() // Top row
+            world.grid[(world.sideLength - 1) * world.sideLength + i] = Cell.WALL.ordinal.toByte() // Bottom row
+            world.grid[i * world.sideLength] = Cell.WALL.ordinal.toByte() // Left column
+            world.grid[i * world.sideLength + (world.sideLength - 1)] = Cell.WALL.ordinal.toByte() // Right column
         }
     }
 
     private fun setup() {
-        world.grid.forEach { row -> row.fill(Cell.EMPTY) }
+
         spawnWalls()
         // Spawn 10 of each in random orders
         var totalOne = 0
