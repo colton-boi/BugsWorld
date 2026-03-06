@@ -6,7 +6,7 @@ class Simulation(sideLength: Int, private val bugOne: BugLogic, private val bugT
     private val world = World(sideLength)
 
     private fun spawnBug(speciesId: Int, position: Point, direction: Direction) {
-        val bug = Bug(world.bugs.size, position, direction, speciesId)
+        val bug = Bug(world.bugs.size, position.x, position.y, direction, speciesId)
         world.bugs.add(bug)
         world.grid[position.x][position.y] = if (speciesId == 1) Cell.SPECIES1 else Cell.SPECIES2
         world.bugGrid[position.x][position.y] = bug
@@ -40,8 +40,8 @@ class Simulation(sideLength: Int, private val bugOne: BugLogic, private val bugT
         // Spawn 10 of each in random orders
         var totalOne = 0
         var totalTwo = 0
-        repeat(20) {
-            if (totalOne < 10 && (totalTwo >= 10 || java.util.concurrent.ThreadLocalRandom.current().nextDouble() < 0.5)) {
+        repeat(100) {
+            if (totalOne < 50 && (totalTwo >= 50 || java.util.concurrent.ThreadLocalRandom.current().nextDouble() < 0.5)) {
                 spawnBugRandom(1)
                 totalOne++
             } else {
@@ -64,8 +64,9 @@ class Simulation(sideLength: Int, private val bugOne: BugLogic, private val bugT
         while (world.species1Count > 0 && world.species2Count > 0) {
             playTurn()
             it++
-            if (it > 2000) {
-                return 0 to it // Draw after 2k turns to prevent infinite loops
+            if (it >= 1000) {
+                // Timeout, determine winner by who has more bugs
+                return (if (world.species1Count > world.species2Count) 1 else 2) to it
             }
         }
         return (if (world.species1Count > 0) 1 else 2) to it

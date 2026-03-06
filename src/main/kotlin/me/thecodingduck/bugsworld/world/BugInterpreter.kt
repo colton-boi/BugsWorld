@@ -15,8 +15,8 @@ import java.util.concurrent.ThreadLocalRandom
  * program counter is maintained.
  */
 class BugInterpreter(val bug: Bug, var logic: BugLogic, private val world: World) {
-    private val species get() = if (bug.speciesId == 1) Cell.SPECIES1 else Cell.SPECIES2
-    private val enemy get() = if (bug.speciesId == 1) Cell.SPECIES2 else Cell.SPECIES1
+    private var species: Cell = Cell.EMPTY
+    private var enemy: Cell = Cell.EMPTY
 
     // Execution stack frames
     private sealed class Frame {
@@ -24,19 +24,26 @@ class BugInterpreter(val bug: Bug, var logic: BugLogic, private val world: World
         class BlockFrame(val statements: List<Statement>, var index: Int) : Frame()
         /** Re-evaluates condition each iteration; pushes body when true */
         class WhileFrame(val loop: WhileLoop) : Frame()
+        class ActionFrame(val action: Action) : Frame()
     }
 
     private val stack = ArrayDeque<Frame>(16)
-
-    init { resetStack() }
 
     private fun resetStack() {
         stack.clear()
         pushNode(logic.statement)
     }
 
+    init { restartIterator() }
+
     fun restartIterator() {
+        updateFactions()
         resetStack()
+    }
+
+    private fun updateFactions() {
+        species = if (bug.speciesId == 1) Cell.SPECIES1 else Cell.SPECIES2
+        enemy = if (bug.speciesId == 1) Cell.SPECIES2 else Cell.SPECIES1
     }
 
     /** Push a statement onto the stack for future execution. */
@@ -56,8 +63,7 @@ class BugInterpreter(val bug: Bug, var logic: BugLogic, private val world: World
                 }
             }
             is Action -> {
-                // Wrap single action in a block frame so it gets executed in the loop
-                stack.addLast(Frame.BlockFrame(listOf(node), 0))
+                stack.addLast(Frame.ActionFrame(node))
             }
         }
     }
@@ -80,7 +86,6 @@ class BugInterpreter(val bug: Bug, var logic: BugLogic, private val world: World
                     }
                     val node = frame.statements[frame.index]
                     frame.index++
-
 
                     when (node) {
                         is Action -> {
@@ -111,6 +116,11 @@ class BugInterpreter(val bug: Bug, var logic: BugLogic, private val world: World
                         stack.removeLast()
                     }
                 }
+                is Frame.ActionFrame -> {
+                    stack.removeLast()
+                    performAction(frame.action)
+                    return // end of turn
+                }
             }
         }
     }
@@ -121,25 +131,18 @@ class BugInterpreter(val bug: Bug, var logic: BugLogic, private val world: World
                 val nx = nextX()
                 val ny = nextY()
                 if (world.grid[nx][ny] == Cell.EMPTY) {
-                    world.grid[bug.position.x][bug.position.y] = Cell.EMPTY
-                    world.bugGrid[bug.position.x][bug.position.y] = null
-                    bug.position = Point(nx, ny)
+                    world.grid[bug.xPos][bug.yPos] = Cell.EMPTY
+                    world.bugGrid[bug.xPos][bug.yPos] = null
+
+                    bug.xPos = nx
+                    bug.yPos = ny
+
                     world.grid[nx][ny] = species
                     world.bugGrid[nx][ny] = bug
                 }
             }
-            Action.TURN_LEFT -> bug.direction = when (bug.direction) {
-                Direction.NORTH -> Direction.WEST
-                Direction.EAST -> Direction.NORTH
-                Direction.SOUTH -> Direction.EAST
-                Direction.WEST -> Direction.SOUTH
-            }
-            Action.TURN_RIGHT -> bug.direction = when (bug.direction) {
-                Direction.NORTH -> Direction.EAST
-                Direction.EAST -> Direction.SOUTH
-                Direction.SOUTH -> Direction.WEST
-                Direction.WEST -> Direction.NORTH
-            }
+            Action.TURN_LEFT -> bug.direction = bug.direction.left
+            Action.TURN_RIGHT -> bug.direction = bug.direction.right
             Action.INFECT -> {
                 val nx = nextX()
                 val ny = nextY()
@@ -170,6 +173,9 @@ class BugInterpreter(val bug: Bug, var logic: BugLogic, private val world: World
     }
 
     private fun evaluateCondition(condition: Condition): Boolean {
+        if (condition == Condition.TRUE) return true
+        if (condition == Condition.RANDOM) return ThreadLocalRandom.current().nextBoolean()
+
         val cell = world.grid[nextX()][nextY()]
         return when (condition) {
             Condition.NEXT_IS_EMPTY -> cell == Cell.EMPTY
@@ -180,20 +186,19 @@ class BugInterpreter(val bug: Bug, var logic: BugLogic, private val world: World
             Condition.NEXT_IS_NOT_WALL -> cell != Cell.WALL
             Condition.NEXT_IS_NOT_ENEMY -> cell != enemy
             Condition.NEXT_IS_NOT_FRIEND -> cell != species
-            Condition.TRUE -> true
-            Condition.RANDOM -> ThreadLocalRandom.current().nextBoolean()
+            else -> false // Should never happen since all conditions are covered
         }
     }
 
     private fun nextX(): Int = when (bug.direction) {
-        Direction.NORTH, Direction.SOUTH -> bug.position.x
-        Direction.EAST -> bug.position.x + 1
-        Direction.WEST -> bug.position.x - 1
+        Direction.NORTH, Direction.SOUTH -> bug.xPos
+        Direction.EAST -> bug.xPos + 1
+        Direction.WEST -> bug.xPos - 1
     }
 
     private fun nextY(): Int = when (bug.direction) {
-        Direction.EAST, Direction.WEST -> bug.position.y
-        Direction.NORTH -> bug.position.y - 1
-        Direction.SOUTH -> bug.position.y + 1
+        Direction.EAST, Direction.WEST -> bug.yPos
+        Direction.NORTH -> bug.yPos - 1
+        Direction.SOUTH -> bug.yPos + 1
     }
 }

@@ -10,15 +10,15 @@ import java.util.UUID
 import kotlin.system.measureTimeMillis
 
 object GaConfig {
-    const val POPULATION_SIZE = 1000
+    const val POPULATION_SIZE = 750
     const val GENERATIONS = 2500
     const val ELITE_COUNT = (POPULATION_SIZE * 0.075).toInt()
     const val TOURNAMENT_SIZE = (POPULATION_SIZE * 0.03).toInt()
     const val MUTATION_RATE = 2.5 // Base mutation rate, adjusted dynamically based on fitness and size
-    const val DEFAULT_OPPONENTS = 5 // Each handcrafted opponent is played this many times (x5 opponents)
-    const val MATCHES_PER_OPPONENT = 16
+    const val DEFAULT_OPPONENTS = 1 // Each handcrafted opponent is played this many times (x5 opponents)
+    const val MATCHES_PER_OPPONENT = 100
     const val MAX_NODES = 500
-    const val NODE_PENALTY = 0.5
+    const val NODE_PENALTY = 5.0
 }
 
 val defaultLogic = WhileLoop(Condition.TRUE,
@@ -79,9 +79,9 @@ val apexSwarmLogic = WhileLoop(Condition.TRUE,
 
 
 val handcraftedOpponents = listOf(
-    BugLogic("Default", defaultLogic),
+//    BugLogic("Default", defaultLogic),
     BugLogic("AggressiveScanner", aggressiveScannerLogic),
-    BugLogic("WallFollower", wallFollowerLogic),
+//    BugLogic("WallFollower", wallFollowerLogic),
     BugLogic("RandomTurner", randomTurnerLogic),
     BugLogic("DoubleInfector", doubleInfectorLogic),
     BugLogic("ApexSwarm", apexSwarmLogic)
@@ -150,7 +150,7 @@ fun main() {
              fitnessScores = runBlocking(Dispatchers.Default) {
                 populationSnapshot.map { bug ->
                     async {
-                        bug to evaluateFitness(bug, gen)
+                        bug to evaluateFitness(bug)
                     }
                 }.awaitAll()
             }.sortedByDescending { it.second }
@@ -171,7 +171,7 @@ fun main() {
         rollingTop50.addAll(deduped.take(50))
 
         // Record best opponent from this generation
-        generationHistory.add(GenerationRecord(gen, fitnessScores.take(3).map { it.first }))
+        generationHistory.add(GenerationRecord(gen, listOf(fitnessScores.first().first)))
 
         val minFitness = fitnessScores.last().second
         val avgFitness = fitnessScores.map { it.second }.average()
@@ -180,7 +180,7 @@ fun main() {
 
         // Test best against all handcrafted opponents
         val beatResults = mutableListOf<Pair<String, Boolean>>()
-        repeat(20) { handcraftedOpponents.map { opponent ->
+        repeat(250) { handcraftedOpponents.map { opponent ->
             val simulation = Simulation(17, bestThisGen.first, opponent)
             val winner = simulation.playMatch()
             beatResults.add(opponent.name to (winner.first == 1))
@@ -234,22 +234,7 @@ fun main() {
     saveTop50ToFile(rollingTop50.map { it.first })
 }
 
-fun getBestOpponentsCandidates(currentGen: Int): List<BugLogic> {
-    val candidates = mutableSetOf<BugLogic>()
-
-    // Add best 3 opponents from last 3 generations
-    if (generationHistory.isNotEmpty()) {
-        val recentCutoff = maxOf(0, currentGen - 3)
-        val recentOpponents = generationHistory
-            .filter { it.generation >= recentCutoff }
-            .flatMap { it.bestBugs }
-        candidates.addAll(recentOpponents)
-    }
-
-    return candidates.toList()
-}
-
-fun evaluateFitness(bug: BugLogic, currentGen: Int = 0): Double {
+fun evaluateFitness(bug: BugLogic): Double {
     var score = 0.0
     val nodeCount = bug.statement.countNodes()
 
@@ -261,19 +246,20 @@ fun evaluateFitness(bug: BugLogic, currentGen: Int = 0): Double {
     val evalBug = BugLogic(bug.name, bug.statement.simplify())
 
     val opponents = mutableListOf<BugLogic>()
-
-    // Get best opponents from recent history
-    val bestOpponents = getBestOpponentsCandidates(currentGen)
-    bestOpponents.forEach { opponent ->
-        opponents.add(BugLogic(opponent.name, opponent.statement.simplify()))
-    }
-
     // Add handcrafted opponents
     repeat(GaConfig.DEFAULT_OPPONENTS) {
         opponents.addAll(handcraftedOpponents)
     }
 
-    var timeouts = 0
+    // Add 2 random bugs from the current population as opponents to encourage beating peers
+    val rng = java.util.concurrent.ThreadLocalRandom.current()
+    repeat(2) {
+        val randomOpponent = population[rng.nextInt(population.size)]
+        opponents.add(randomOpponent)
+    }
+
+    var timeoutWins = 0
+    var timeoutLosses = 0
 
     var totalLosses = 0
     for (opponent in opponents) {
@@ -282,11 +268,11 @@ fun evaluateFitness(bug: BugLogic, currentGen: Int = 0): Double {
             val simulation = Simulation(17, evalBug, opponent)
             val winner = simulation.playMatch()
             val duration = winner.second
-            if (duration == 2001) {
-                timeouts++
-                if (timeouts > 5) {
-                    // If too many timeouts, assume the bug sucks and penalize heavily
-                    return -2000.0 / 20.0 * GaConfig.MATCHES_PER_OPPONENT
+            if (duration >= 2000) {
+                if (winner.first == 1) {
+                    timeoutWins++
+                } else {
+                    timeoutLosses++
                 }
             }
 
@@ -299,15 +285,15 @@ fun evaluateFitness(bug: BugLogic, currentGen: Int = 0): Double {
             }
         }
         if (wins == GaConfig.MATCHES_PER_OPPONENT) {
-            score += 5000.0 // Huge bonus for perfect sweep against an opponent
+            score += 3000.0 // Huge bonus for perfect sweep against an opponent
         } else if (wins >= GaConfig.MATCHES_PER_OPPONENT / 1.25) {
-            score += 3000.0 // Bonus for beating an opponent in a large majority of matches
+            score += 2500.0 // Bonus for beating an opponent in a large majority of matches
         } else if (wins >= GaConfig.MATCHES_PER_OPPONENT / 1.5) {
             score += 1500.0 // Smaller bonus for winning most matches, even if not dominant
         } else if (wins >= GaConfig.MATCHES_PER_OPPONENT / 2) {
-            score += 500.0 // Small bonus for winning at least half the matches, showing some competence
+            score += 1000.0 // Small bonus for winning at least half the matches, showing some competence
         } else if (wins >= GaConfig.MATCHES_PER_OPPONENT / 3) {
-            score += 100.0 // Minimal bonus for winning some matches, but likely not a strong opponent
+            score += 500.0 // Minimal bonus for winning some matches, but likely not a strong opponent
         } else if (wins == 0) {
             totalLosses++
             score -= 2000.0 // Penalty for being completely dominated by an opponent
@@ -317,6 +303,9 @@ fun evaluateFitness(bug: BugLogic, currentGen: Int = 0): Double {
             }
         }
     }
+
+    score += timeoutWins * 20.0
+    score -= timeoutLosses * 50.0
 
     score -= nodeCount * GaConfig.NODE_PENALTY
     score -= (bug.statement.getAllNodes().count { it is IfStatement && it.condition == Condition.RANDOM }
