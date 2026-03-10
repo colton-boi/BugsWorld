@@ -4,21 +4,24 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+import me.thecodingduck.bugsworld.bytecode.Compiler
 import me.thecodingduck.bugsworld.world.Simulation
 import java.io.File
 import java.util.UUID
+import kotlin.math.abs
 import kotlin.system.measureTimeMillis
 
 object GaConfig {
-    const val POPULATION_SIZE = 1000
+    const val POPULATION_SIZE = 500
     const val GENERATIONS = 2500
     const val ELITE_COUNT = (POPULATION_SIZE * 0.075).toInt()
-    const val TOURNAMENT_SIZE = (POPULATION_SIZE * 0.03).toInt()
-    const val MUTATION_RATE = 3 // Base mutation rate, adjusted dynamically based on fitness and size
+    const val TOURNAMENT_SIZE = (POPULATION_SIZE * 0.05).toInt()
+    const val MUTATION_RATE = 2 // Base mutation rate, adjusted dynamically based on fitness and size
     const val DEFAULT_OPPONENTS = 1 // Each handcrafted opponent is played this many times (x5 opponents)
-    const val MATCHES_PER_OPPONENT = 50
+    const val MATCHES_PER_OPPONENT = 128
     const val MAX_NODES = 500
-    const val NODE_PENALTY = 5.0
+    const val SIDE_LENGTH = 17
+    const val TIMEOUT_THRESHOLD = 1000 // turns, matches lasting longer than this are considered ties
 }
 
 val defaultLogic = WhileLoop(Condition.TRUE,
@@ -77,14 +80,27 @@ val apexSwarmLogic = WhileLoop(Condition.TRUE,
     )
 )
 
+val spinToWinLogic = WhileLoop(Condition.TRUE,
+    IfStatement(Condition.NEXT_IS_ENEMY, Action.INFECT, Action.TURN_LEFT)
+)
+
+val lawnMowerLogic = WhileLoop(Condition.TRUE,
+    IfStatement(Condition.NEXT_IS_ENEMY, Action.INFECT,
+        IfStatement(Condition.NEXT_IS_EMPTY, Action.MOVE, Action.TURN_LEFT)
+    )
+)
+
 
 val handcraftedOpponents = listOf(
-//    BugLogic("Default", defaultLogic),
+    BugLogic("Default", defaultLogic),
     BugLogic("AggressiveScanner", aggressiveScannerLogic),
-//    BugLogic("WallFollower", wallFollowerLogic),
+    BugLogic("WallFollower", wallFollowerLogic),
+    BugLogic("SpinToWin", spinToWinLogic),
+    BugLogic("SpinToWin", spinToWinLogic),
     BugLogic("RandomTurner", randomTurnerLogic),
     BugLogic("DoubleInfector", doubleInfectorLogic),
-    BugLogic("ApexSwarm", apexSwarmLogic)
+    BugLogic("ApexSwarm", apexSwarmLogic),
+    BugLogic("LawnMower", lawnMowerLogic)
 )
 
 fun loadTop50FromFile(): List<BugLogic> {
@@ -117,7 +133,7 @@ var population = MutableList(GaConfig.POPULATION_SIZE) {
 
 fun main() {
     println("Starting Evolutionary Algorithm with population size ${GaConfig.POPULATION_SIZE} and ${GaConfig.GENERATIONS} generations")
-    println("Configuration: TOURNAMENT_SIZE=${GaConfig.TOURNAMENT_SIZE}, MUTATION_RATE=${GaConfig.MUTATION_RATE}, NODE_PENALTY=${GaConfig.NODE_PENALTY}")
+    println("Configuration: TOURNAMENT_SIZE=${GaConfig.TOURNAMENT_SIZE}, MUTATION_RATE=${GaConfig.MUTATION_RATE}")
 
     val savedBugs = loadTop50FromFile()
     for ((i, bug) in savedBugs.take(GaConfig.POPULATION_SIZE - 1).withIndex()) {
@@ -134,7 +150,6 @@ fun main() {
                         bestSaved.statement.countNodes().toDouble()))
         }
     }
-    population.addAll(handcraftedOpponents)
 
     var bestEver: Pair<BugLogic, Double>? = null
 
@@ -180,11 +195,33 @@ fun main() {
 
         // Test best against all handcrafted opponents
         val beatResults = mutableListOf<Pair<String, Boolean>>()
-        repeat(250) { handcraftedOpponents.map { opponent ->
-            val simulation = Simulation(17, bestThisGen.first, opponent)
-            val winner = simulation.playMatch()
-            beatResults.add(opponent.name to (winner.first == 1))
-        }}
+        var timeoutWins = 0
+        var timeoutLosses = 0
+
+        val bestLogic = Compiler.compile(bestThisGen.first.statement)
+
+        runBlocking(Dispatchers.Default) {
+            async {
+                handcraftedOpponents.map { opponent ->
+                    val opponentLogic = Compiler.compile(opponent.statement)
+                    repeat(125) {
+                        val simulation = Simulation(GaConfig.SIDE_LENGTH, bestLogic, opponentLogic)
+                        val packed = simulation.playMatch()
+                        val winner = Simulation.unpackWinner(packed)
+                        val duration = Simulation.unpackTurns(packed)
+                        if (duration >= GaConfig.TIMEOUT_THRESHOLD) {
+                            if (winner == 1) {
+                                timeoutWins++
+                            } else {
+                                timeoutLosses++
+                            }
+                        } else {
+                            beatResults.add(opponent.name to (winner == 1))
+                        }
+                    }
+                }
+            }
+        }
         // Summarize per opponent results
         val beatsSummary = beatResults.groupBy { it.first }.mapValues { entry ->
             val wins = entry.value.count { it.second }
@@ -194,7 +231,8 @@ fun main() {
         val winsCount = beatResults.count { it.second }
         println("Gen $gen: size=${population.size}, " +
                 "min/avg/max fitness = ${minFitness.toInt()} / ${avgFitness.toInt()} / ${maxFitness.toInt()}, " +
-                "nodes=${uniqueNodes}, wins=${winsCount}/${beatResults.size}, time=${took}ms")
+                "nodes=${uniqueNodes}, wins=${winsCount}/${beatResults.size}, time=${took}ms, " +
+                "timeouts=$timeoutWins wins, $timeoutLosses losses. ")
         println("  Matchups: $beatsSummary")
 
         if (gen % 10 == 0) {
@@ -214,14 +252,14 @@ fun main() {
             val parent = tournamentSelection(fitnessScores)
             val mate = tournamentSelection(fitnessScores)
             val child = crossOver(parent.statement, mate.statement)
-            val mutationRate = ((if (avgFitness.toInt() < 1000) GaConfig.MUTATION_RATE * 2 else GaConfig.MUTATION_RATE)
-                    / parent.statement.countNodes().toDouble())
+            val mutationRate = ((if (abs(maxFitness - bestEver.second) < 100)
+                GaConfig.MUTATION_RATE * 2 else GaConfig.MUTATION_RATE) / parent.statement.countNodes().toDouble())
 
             val childAST = mutate(child, mutationRate)
 
             // Only add children that can infect
             if (childAST.getAllNodes().any { node -> node == Action.INFECT }) {
-                newPopulation.add(BugLogic(UUID.randomUUID().toString(), childAST))
+                newPopulation.add(BugLogic(UUID.randomUUID().toString(), childAST.simplify()))
             }
         }
         population = newPopulation
@@ -240,76 +278,95 @@ fun evaluateFitness(bug: BugLogic): Double {
 
     // Hard cap: penalize heavily if too large
     if (nodeCount > GaConfig.MAX_NODES) {
-        return -10000.0
+        return -100000.0
     }
-
-    val evalBug = BugLogic(bug.name, bug.statement.simplify())
 
     val opponents = mutableListOf<BugLogic>()
     // Add handcrafted opponents
     repeat(GaConfig.DEFAULT_OPPONENTS) {
         opponents.addAll(handcraftedOpponents)
     }
+    // add the top 3 from past generations to ensure continued pressure to beat the best
+    // opponents.addAll(rollingTop50.take(3).map { it.first })
 
-    // Add 2 random bugs from the current population as opponents to encourage beating peers
-    val rng = java.util.concurrent.ThreadLocalRandom.current()
-    repeat(2) {
-        val randomOpponent = population[rng.nextInt(population.size)]
-        opponents.add(randomOpponent)
-    }
-
-    var timeoutWins = 0
-    var timeoutLosses = 0
 
     var totalLosses = 0
+    var totalWins = 0
+    var totalDecisive = 0
+    val bugLogic = Compiler.compile(bug.statement)
     for (opponent in opponents) {
+        var timeoutWins = 0
+        var timeoutLosses = 0
         var wins = 0
+        var losses = 0
+        val opponentLogic = Compiler.compile(opponent.statement)
         repeat(GaConfig.MATCHES_PER_OPPONENT) {
-            val simulation = Simulation(17, evalBug, opponent)
-            val winner = simulation.playMatch()
-            val duration = winner.second
-            if (duration >= 2000) {
-                if (winner.first == 1) {
-                    timeoutWins++
-                } else {
-                    timeoutLosses++
+            val simulation = Simulation(17, bugLogic, opponentLogic)
+            val packed = simulation.playMatch()
+            val winner = Simulation.unpackWinner(packed)
+            val duration = Simulation.unpackTurns(packed)
+
+            if (duration >= GaConfig.TIMEOUT_THRESHOLD) {
+                if (winner == 1) timeoutWins++ else timeoutLosses++
+            } else {
+                when (winner) {
+                    1 -> {
+                        wins++
+                        val speedFraction = (GaConfig.TIMEOUT_THRESHOLD - duration).toDouble() / GaConfig.TIMEOUT_THRESHOLD
+                        score += 50 + speedFraction * 200 // 50 base + up to 200 for speed
+                    }
+                    2 -> {
+                        losses++
+                        val speedFraction = (GaConfig.TIMEOUT_THRESHOLD - duration).toDouble() / GaConfig.TIMEOUT_THRESHOLD
+                        score -= 50 + speedFraction * 150 // faster losses are worse
+                    }
                 }
             }
 
-            when (winner.first) {
-                1 -> {
-                    wins += 1
-                    score += (2000 - duration) / 20 // Faster wins are better
-                }
-                2 -> score -= (2000 - duration) / 20 // Losing faster is worse
+            if (score < -100000.0) {
+                return score
             }
         }
-        if (wins == GaConfig.MATCHES_PER_OPPONENT) {
-            score += 3000.0 // Huge bonus for perfect sweep against an opponent
-        } else if (wins >= GaConfig.MATCHES_PER_OPPONENT / 1.25) {
-            score += 2500.0 // Bonus for beating an opponent in a large majority of matches
-        } else if (wins >= GaConfig.MATCHES_PER_OPPONENT / 1.5) {
-            score += 1500.0 // Smaller bonus for winning most matches, even if not dominant
-        } else if (wins >= GaConfig.MATCHES_PER_OPPONENT / 2) {
-            score += 1000.0 // Small bonus for winning at least half the matches, showing some competence
-        } else if (wins >= GaConfig.MATCHES_PER_OPPONENT / 3) {
-            score += 500.0 // Minimal bonus for winning some matches, but likely not a strong opponent
-        } else if (wins == 0) {
+
+        val totalTimeouts = timeoutWins + timeoutLosses
+        val decisive = wins + losses
+        totalDecisive += decisive
+
+        // Flat timeout penalty — timeouts are always bad
+        score -= totalTimeouts * 40.0
+        // Slight advantage for timeout wins over losses (shows progress toward winning)
+        score += timeoutWins * 15.0
+        score -= timeoutLosses * 15.0
+
+        // Score decisive matches
+        if (decisive > 0) {
+            val winRate = wins.toDouble() / decisive
+            score += (winRate * winRate) * 5000.0
+            score += winRate * 2500.0 // linear component to reward any wins
+            score += wins * 100.0 // small per-win bonus to reward more wins even at same win rate
+            if (opponent == spinToWinLogic) {
+                score += wins * 250.0 // extra bonus for beating the notoriously tough SpinToWin
+                score += (winRate * winRate) * 10000.0 // extra bonus for high win rate against SpinToWin
+            }
+        }
+        if (wins == 0 && decisive > 8) {
             totalLosses++
-            score -= 2000.0 // Penalty for being completely dominated by an opponent
-            if (totalLosses > opponents.size / 10) {
-                // If losing to most opponents, assume the bug is very bad and penalize heavily
-                return score - 10000.0
+            score -= 4000.0
+            if (totalLosses > opponents.size / 5) {
+                return score - 20000.0
             }
         }
+        totalWins += wins
     }
 
-    score += timeoutWins * 20.0
-    score -= timeoutLosses * 50.0
+    // Overall win rate bonus (based on decisive matches only)
+    if (totalDecisive > 0) {
+        val winRate = totalWins.toDouble() / totalDecisive
+        score += (winRate * winRate) * 50000.0
+    }
 
-    score -= nodeCount * GaConfig.NODE_PENALTY
-    score -= (bug.statement.getAllNodes().count { it is IfStatement && it.condition == Condition.RANDOM }
-            * GaConfig.NODE_PENALTY)
+    // Structural bonus: reward having MOVE (encourages mobility)
+    if (bug.statement.getAllNodes().any { it == Action.MOVE }) score += 500.0
 
     return score
 }
